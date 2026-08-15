@@ -1,70 +1,83 @@
 name: Build BOND2 APK
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - 'bond2-project-fixed-final-v8.zip'
-      - '.github/workflows/build-apk.yml'
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build release APK
+    name: Build BOND2 Release APK
     runs-on: ubuntu-22.04
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Locate project ZIP
-        id: locate_zip
+      # --------------------------------------------------
+      # Find the uploaded ZIP
+      # --------------------------------------------------
+      - name: Find BOND2 ZIP
+        id: project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          ZIP="./bond2-project-fixed-final-v8.zip"
+          ZIP="bond2-project-fixed-final-v8.zip"
 
           if [ ! -f "$ZIP" ]; then
-            echo "Required project ZIP not found: $ZIP" >&2
-            echo "Files in repository root:"
+            echo "ERROR: $ZIP was not found in repository root."
+            echo "Repository files:"
             ls -la
             exit 1
           fi
 
-          echo "Using ZIP: $ZIP"
+          echo "Found: $ZIP"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      - name: Extract project
+      # --------------------------------------------------
+      # Extract ZIP
+      # --------------------------------------------------
+      - name: Extract BOND2 project
         id: extract
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q "${{ steps.locate_zip.outputs.zip }}" -d extracted
+          unzip -q "${{ steps.project.outputs.zip }}" -d extracted
 
-          PROJECT_DIR="$(dirname "$(find extracted -type f -name pubspec.yaml -print -quit)")"
+          PROJECT_DIR=$(find extracted -type f -name pubspec.yaml -printf '%h\n' | head -n 1)
 
-          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
-            echo "pubspec.yaml was not found after extracting the ZIP." >&2
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: pubspec.yaml not found inside ZIP."
+            find extracted -maxdepth 4 -type f | head -100
             exit 1
           fi
 
-          echo "Project directory: $PROJECT_DIR"
+          echo "Project found at: $PROJECT_DIR"
+
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
+      # --------------------------------------------------
+      # Java
+      # --------------------------------------------------
       - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
+      # --------------------------------------------------
+      # Flutter
+      # --------------------------------------------------
       - name: Setup Flutter 3.24.5
         uses: subosito/flutter-action@v2
         with:
@@ -72,102 +85,91 @@ jobs:
           channel: stable
           cache: true
 
+      # --------------------------------------------------
+      # Android SDK
+      # --------------------------------------------------
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 35 + required NDK
+      - name: Install Android SDK and NDK
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          yes | sdkmanager --licenses >/dev/null || true
 
-          if [ -z "$SDK_ROOT" ]; then
-            SDKMANAGER="$(find /usr/local/lib/android/sdk "$HOME" -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
-
-            if [ -z "$SDKMANAGER" ]; then
-              echo "sdkmanager could not be found." >&2
-              exit 1
-            fi
-
-            SDK_ROOT="$(dirname "$(dirname "$(dirname "$(dirname "$SDKMANAGER")")")")"
-          else
-            SDKMANAGER="$(find "$SDK_ROOT" -type f -name sdkmanager | head -n 1 || true)"
-          fi
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager could not be found under $SDK_ROOT" >&2
-            exit 1
-          fi
-
-          echo "Android SDK: $SDK_ROOT"
-          echo "sdkmanager: $SDKMANAGER"
-
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-
-          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          "$SDKMANAGER" \
+          sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;26.1.10909125"
 
-      - name: Verify Android configuration
+      # --------------------------------------------------
+      # Flutter dependencies
+      # --------------------------------------------------
+      - name: Flutter clean
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
+        run: flutter clean
 
-          echo "=== Android app configuration ==="
-          grep -nE 'compileSdk|targetSdk|ndkVersion' android/app/build.gradle
-
-          echo "=== Gradle plugins ==="
-          grep -nE 'com.android.application|org.jetbrains.kotlin.android' android/settings.gradle
-
-          echo "=== Flutter doctor ==="
-          flutter doctor -v
-
-      - name: Install dependencies
+      - name: Flutter pub get
         working-directory: ${{ steps.extract.outputs.project_dir }}
         run: flutter pub get
 
-      - name: Generate Drift code
+      # --------------------------------------------------
+      # Drift generated files
+      # --------------------------------------------------
+      - name: Generate Drift database code
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: dart run build_runner build --delete-conflicting-outputs
+        run: |
+          dart run build_runner build --delete-conflicting-outputs
 
+      # --------------------------------------------------
+      # Analyze
+      # --------------------------------------------------
       - name: Flutter analyze
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+        run: |
+          flutter analyze --no-fatal-warnings --no-fatal-infos
 
+      # --------------------------------------------------
+      # Tests
+      # --------------------------------------------------
       - name: Flutter tests
         working-directory: ${{ steps.extract.outputs.project_dir }}
         run: flutter test
 
+      # --------------------------------------------------
+      # Build APK
+      # --------------------------------------------------
       - name: Build release APK
         working-directory: ${{ steps.extract.outputs.project_dir }}
         run: flutter build apk --release
 
-      - name: Verify APK exists
+      # --------------------------------------------------
+      # Verify APK
+      # --------------------------------------------------
+      - name: Verify APK
         working-directory: ${{ steps.extract.outputs.project_dir }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          test -s "$APK"
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
 
-          echo "APK successfully created:"
+          echo "APK successfully generated:"
           ls -lh "$APK"
 
-      - name: Upload release APK
+      # --------------------------------------------------
+      # Upload APK
+      # --------------------------------------------------
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BOND2-release-apk
+          name: BOND2-release-APK
           path: ${{ steps.extract.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
