@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "*.zip"
+      - "bond2-project-fixed-final-v13.zip"
       - ".github/workflows/build-apk.yml"
 
 permissions:
@@ -25,19 +25,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP="$(find . -maxdepth 1 -type f -iname 'bond2-project-fixed-final-v12.zip' -print -quit)"
+          ZIP="./bond2-project-fixed-final-v13.zip"
 
-          if [ -z "$ZIP" ]; then
-            echo "ERROR: bond2-project-fixed-final-v12.zip was not found."
-            echo "Files in repository root:"
-            find . -maxdepth 1 -type f -print
+          if [ ! -f "$ZIP" ]; then
+            echo "ERROR: $ZIP was not found."
+            echo "Repository root:"
+            find . -maxdepth 2 -type f -print | sort
             exit 1
           fi
 
-          echo "Found: $ZIP"
-          echo "zip_file=${ZIP#./}" >> "$GITHUB_OUTPUT"
+          echo "Using: $ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      - name: Extract project ZIP
+      - name: Extract BOND2 project
         id: extract
         shell: bash
         run: |
@@ -46,18 +46,17 @@ jobs:
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q -o "${{ steps.locate_zip.outputs.zip_file }}" -d extracted
+          unzip -q -o "${{ steps.locate_zip.outputs.zip }}" -d extracted
 
           PROJECT_DIR="$(dirname "$(find extracted -type f -name pubspec.yaml -print -quit)")"
 
           if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
-            echo "ERROR: Flutter pubspec.yaml was not found after extraction."
-            echo "Extracted files:"
-            find extracted -maxdepth 4 -type f | head -200
+            echo "ERROR: pubspec.yaml was not found."
+            find extracted -maxdepth 5 -type f | sort | head -300
             exit 1
           fi
 
-          echo "Flutter project directory: $PROJECT_DIR"
+          echo "Project directory: $PROJECT_DIR"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17
@@ -67,6 +66,13 @@ jobs:
           java-version: "17"
           cache: gradle
 
+      - name: Setup Flutter 3.24.5
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
@@ -75,86 +81,218 @@ jobs:
         run: |
           set -euo pipefail
 
-          yes | sdkmanager --licenses >/dev/null || true
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
 
-          sdkmanager \
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+              -type f \
+              -name sdkmanager \
+              -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "${SDKMANAGER:-}" ]; then
+            echo "ERROR: sdkmanager not found."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;26.1.10909125"
 
-      - name: Verify Android SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "ANDROID_HOME=${ANDROID_HOME:-}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
-
-          sdkmanager --list_installed | grep -E \
-            'platforms;android-35|build-tools;35.0.0|ndk;26.1.10909125'
-
-      - name: Setup Flutter 3.24.5
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.24.5"
-          channel: stable
-          cache: true
-
       - name: Flutter clean
         working-directory: ${{ steps.extract.outputs.project_dir }}
         run: flutter clean
-
-      - name: Verify BOND2 Android configuration
-        working-directory: ${{ steps.extract.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== android/app/build.gradle ==="
-          grep -nE 'compileSdk|targetSdk|ndkVersion' android/app/build.gradle
-
-          echo
-          echo "=== android/build.gradle ==="
-          cat android/build.gradle
-
-          echo
-          echo "=== gradle wrapper ==="
-          grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
-
-          echo
-          echo "=== settings.gradle ==="
-          grep -nE 'com.android.application|org.jetbrains.kotlin.android' android/settings.gradle
-
-          echo
-          echo "=== Checking required values ==="
-
-          grep -q 'compileSdk 35' android/app/build.gradle
-          grep -q 'targetSdk 35' android/app/build.gradle
-          grep -q 'ndkVersion "26.1.10909125"' android/app/build.gradle
-
-          echo "Android configuration verification passed."
-
-      - name: Flutter doctor
-        working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: flutter doctor -v
 
       - name: Install dependencies
         working-directory: ${{ steps.extract.outputs.project_dir }}
         run: flutter pub get
 
-      - name: Generate Drift database code
+      - name: Force Android plugins to compile with SDK 35
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: dart run build_runner build --delete-conflicting-outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          pub_cache = Path(
+              os.environ.get(
+                  "PUB_CACHE",
+                  str(Path.home() / ".pub-cache")
+              )
+          )
+
+          root = pub_cache / "hosted" / "pub.dev"
+
+          if not root.exists():
+              raise SystemExit(f"Pub cache not found: {root}")
+
+          patched = []
+
+          for build_file in root.glob("*/android/build.gradle"):
+              text = build_file.read_text(
+                  encoding="utf-8",
+                  errors="ignore"
+              )
+
+              original = text
+
+              # Old Flutter/plugin syntax.
+              text = re.sub(
+                  r'compileSdkVersion\s+flutter\.compileSdkVersion',
+                  'compileSdkVersion 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdkVersion\s+30\b',
+                  'compileSdkVersion 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdkVersion\s+31\b',
+                  'compileSdkVersion 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdkVersion\s+32\b',
+                  'compileSdkVersion 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdkVersion\s+33\b',
+                  'compileSdkVersion 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdkVersion\s+34\b',
+                  'compileSdkVersion 35',
+                  text
+              )
+
+              # New AGP syntax.
+              text = re.sub(
+                  r'compileSdk\s+30\b',
+                  'compileSdk 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdk\s+31\b',
+                  'compileSdk 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdk\s+32\b',
+                  'compileSdk 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdk\s+33\b',
+                  'compileSdk 35',
+                  text
+              )
+
+              text = re.sub(
+                  r'compileSdk\s+34\b',
+                  'compileSdk 35',
+                  text
+              )
+
+              if text != original:
+                  build_file.write_text(
+                      text,
+                      encoding="utf-8"
+                  )
+                  patched.append(str(build_file))
+
+          print("Android plugin Gradle files patched:")
+          for item in patched:
+              print("  " + item)
+
+          printing = sorted(root.glob("printing-*/android/build.gradle"))
+
+          if printing:
+              print("Printing plugin detected:")
+              for item in printing:
+                  print("  " + str(item))
+          else:
+              print("WARNING: printing plugin Gradle file was not found.")
+          PY
+
+      - name: Verify Android configuration
+        working-directory: ${{ steps.extract.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== APP BUILD.GRADLE ====="
+          grep -nE \
+            'compileSdk|targetSdk|ndkVersion' \
+            android/app/build.gradle
+
+          echo
+          echo "===== ROOT BUILD.GRADLE ====="
+          cat android/build.gradle
+
+          echo
+          echo "===== SETTINGS.GRADLE ====="
+          grep -nE \
+            'com.android.application|org.jetbrains.kotlin.android' \
+            android/settings.gradle
+
+          echo
+          echo "===== GRADLE WRAPPER ====="
+          grep distributionUrl \
+            android/gradle/wrapper/gradle-wrapper.properties
+
+          echo
+          echo "===== REQUIRED VALUES ====="
+
+          grep -q \
+            'compileSdk 35' \
+            android/app/build.gradle
+
+          grep -q \
+            'targetSdk 35' \
+            android/app/build.gradle
+
+          grep -q \
+            'ndkVersion "26.1.10909125"' \
+            android/app/build.gradle
+
+          echo "Android configuration OK."
+
+      - name: Generate Drift code
+        working-directory: ${{ steps.extract.outputs.project_dir }}
+        run: |
+          dart run build_runner build \
+            --delete-conflicting-outputs
 
       - name: Flutter analyze
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        continue-on-error: true
-        run: flutter analyze --no-fatal-infos
+        run: |
+          flutter analyze \
+            --no-fatal-warnings \
+            --no-fatal-infos
 
       - name: Flutter tests
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        continue-on-error: true
         run: flutter test
 
       - name: Build release APK
@@ -177,9 +315,9 @@ jobs:
           echo "APK successfully generated:"
           ls -lh "$APK"
 
-      - name: Upload release APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: bond2-release-apk
+          name: BOND2-release-apk
           path: ${{ steps.extract.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
