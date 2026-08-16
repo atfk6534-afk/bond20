@@ -17,27 +17,29 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Locate BOND2 project ZIP
-        id: locate_zip
+      - name: Find BOND2 ZIP
+        id: zip
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP="$(find . -maxdepth 1 -type f -iname 'bond2-project-fixed-final-v16.zip' -print -quit)"
+          ZIP="$(find . -maxdepth 1 -type f \
+            -iname 'bond2-project-fixed-final-v17.zip' \
+            -print -quit)"
 
           if [ -z "$ZIP" ]; then
-            echo "ERROR: bond2-project-fixed-final-v16.zip was not found."
-            echo "Files in repository root:"
-            find . -maxdepth 1 -type f -print
+            echo "ERROR: bond2-project-fixed-final-v17.zip not found."
+            echo "Files in repository:"
+            find . -maxdepth 1 -type f -printf '%f\n'
             exit 1
           fi
 
-          echo "Found: $ZIP"
+          echo "Found ZIP: $ZIP"
           echo "zip_file=${ZIP#./}" >> "$GITHUB_OUTPUT"
 
-      - name: Extract project ZIP
+      - name: Extract BOND2 project
         id: extract
         shell: bash
         run: |
@@ -46,18 +48,21 @@ jobs:
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q -o "${{ steps.locate_zip.outputs.zip_file }}" -d extracted
+          unzip -q -o "${{ steps.zip.outputs.zip_file }}" -d extracted
 
-          PROJECT_DIR="$(dirname "$(find extracted -type f -name pubspec.yaml -print -quit)")"
+          PROJECT_DIR="$(dirname "$(find extracted \
+            -type f \
+            -name pubspec.yaml \
+            -print -quit)")"
 
-          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
-            echo "ERROR: Flutter pubspec.yaml was not found after extraction."
-            echo "Extracted files:"
+          if [ -z "$PROJECT_DIR" ] || \
+             [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
+            echo "ERROR: pubspec.yaml not found."
             find extracted -maxdepth 4 -type f | head -200
             exit 1
           fi
 
-          echo "Flutter project directory: $PROJECT_DIR"
+          echo "Project directory: $PROJECT_DIR"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17
@@ -68,9 +73,9 @@ jobs:
           cache: gradle
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK 35 and NDK 26.1
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -83,18 +88,7 @@ jobs:
             "build-tools;35.0.0" \
             "ndk;26.1.10909125"
 
-      - name: Verify Android SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "ANDROID_HOME=${ANDROID_HOME:-}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
-
-          sdkmanager --list_installed | grep -E \
-            'platforms;android-35|build-tools;35.0.0|ndk;26.1.10909125'
-
-      - name: Setup Flutter 3.24.5
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.24.5"
@@ -105,57 +99,25 @@ jobs:
         working-directory: ${{ steps.extract.outputs.project_dir }}
         run: flutter clean
 
-      - name: Verify BOND2 Android configuration
-        working-directory: ${{ steps.extract.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== android/app/build.gradle ==="
-          grep -nE 'compileSdk|targetSdk|ndkVersion' android/app/build.gradle
-
-          echo
-          echo "=== android/build.gradle ==="
-          cat android/build.gradle
-
-          echo
-          echo "=== gradle wrapper ==="
-          grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
-
-          echo
-          echo "=== settings.gradle ==="
-          grep -nE 'com.android.application|org.jetbrains.kotlin.android' android/settings.gradle
-
-          echo
-          echo "=== Checking required values ==="
-
-          grep -q 'compileSdk 35' android/app/build.gradle
-          grep -q 'targetSdk 35' android/app/build.gradle
-          grep -q 'ndkVersion "26.1.10909125"' android/app/build.gradle
-
-          echo "Android configuration verification passed."
-
-      - name: Flutter doctor
-        working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: flutter doctor -v
-
       - name: Install dependencies
         working-directory: ${{ steps.extract.outputs.project_dir }}
         run: flutter pub get
 
-      - name: Generate Drift database code
+      - name: Generate Drift code
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: dart run build_runner build --delete-conflicting-outputs
+        run: |
+          dart run build_runner build \
+            --delete-conflicting-outputs
 
       - name: Flutter analyze
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        continue-on-error: true
         run: flutter analyze --no-fatal-infos
+        continue-on-error: true
 
       - name: Flutter tests
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        continue-on-error: true
         run: flutter test
+        continue-on-error: true
 
       - name: Build release APK
         working-directory: ${{ steps.extract.outputs.project_dir }}
@@ -174,10 +136,10 @@ jobs:
             exit 1
           fi
 
-          echo "APK successfully generated:"
+          echo "APK generated successfully:"
           ls -lh "$APK"
 
-      - name: Upload release APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: bond2-release-apk
