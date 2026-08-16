@@ -1,60 +1,78 @@
-name: Build BOND2 APK
+name: BOND2 - Build APK
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build BOND2 Release APK
+    name: Build BOND2 APK
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Find project ZIP
-        id: project
+      - name: Show repository files
+        run: |
+          echo "Repository root:"
+          pwd
+          echo
+          ls -lah
+
+      - name: Locate BOND2 ZIP
+        id: locate
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ZIP="bond2-project-fixed-final-v9.zip"
+          ZIP="$(find . -maxdepth 2 -type f \
+            \( -name 'bond2-project-fixed-final-v10.zip' \
+            -o -name 'bond2-project-fixed-final-v*.zip' \) \
+            | head -n 1)"
 
-          if [ ! -f "$ZIP" ]; then
-            echo "ERROR: $ZIP not found."
-            ls -la
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: BOND2 ZIP was not found."
+            echo
+            echo "Available ZIP files:"
+            find . -maxdepth 3 -type f -iname '*.zip' -print || true
             exit 1
           fi
 
-          echo "Found $ZIP"
+          echo "Using ZIP: $ZIP"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      - name: Extract project
+      - name: Extract BOND2
         id: extract
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           rm -rf extracted
-          mkdir extracted
+          mkdir -p extracted
 
-          unzip -q "${{ steps.project.outputs.zip }}" -d extracted
+          unzip -q "${{ steps.locate.outputs.zip }}" -d extracted
 
-          PROJECT_DIR=$(find extracted -type f -name pubspec.yaml -printf '%h\n' | head -n 1)
+          echo "Extracted structure:"
+          find extracted -maxdepth 3 -type f \
+            \( -name 'pubspec.yaml' -o -name 'settings.gradle*' -o -name 'build.gradle*' \) \
+            -print
+
+          PROJECT_DIR="$(find extracted -type f -name pubspec.yaml -printf '%h\n' | head -n 1)"
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: pubspec.yaml not found."
-            find extracted -maxdepth 4 -type f
+            echo "ERROR: Could not find pubspec.yaml."
             exit 1
           fi
 
-          echo "Project: $PROJECT_DIR"
+          echo "Flutter project:"
+          echo "$PROJECT_DIR"
+
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17
@@ -63,7 +81,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Flutter
+      - name: Setup Flutter 3.24.5
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
@@ -73,18 +91,35 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 35 and NDK
+      - name: Install Android SDK 35 and NDK 26
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;26.1.10909125"
+
+      - name: Verify Android configuration
+        working-directory: ${{ steps.extract.outputs.project_dir }}
+        shell: bash
+        run: |
+          echo "Flutter:"
+          flutter --version
+
+          echo
+          echo "Android configuration:"
+          grep -R \
+            -n \
+            -E 'compileSdk|compileSdkVersion|ndkVersion' \
+            android \
+            --include='*.gradle' \
+            --include='*.gradle.kts' \
+            || true
 
       - name: Flutter clean
         working-directory: ${{ steps.extract.outputs.project_dir }}
@@ -96,11 +131,13 @@ jobs:
 
       - name: Generate Drift code
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: dart run build_runner build --delete-conflicting-outputs
+        run: |
+          dart run build_runner build --delete-conflicting-outputs
 
       - name: Flutter analyze
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+        run: |
+          flutter analyze --no-fatal-warnings --no-fatal-infos
 
       - name: Flutter tests
         working-directory: ${{ steps.extract.outputs.project_dir }}
@@ -108,27 +145,37 @@ jobs:
 
       - name: Build release APK
         working-directory: ${{ steps.extract.outputs.project_dir }}
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release --verbose
 
       - name: Verify APK
+        id: apk
         working-directory: ${{ steps.extract.outputs.project_dir }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          if [ ! -s "$APK" ]; then
+          if [ ! -f "$APK" ]; then
             echo "ERROR: APK was not generated."
             exit 1
           fi
 
-          echo "APK generated successfully:"
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK exists but is empty."
+            exit 1
+          fi
+
+          echo "APK successfully generated:"
           ls -lh "$APK"
 
-      - name: Upload APK
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: BOND2-release-APK
           path: ${{ steps.extract.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+          retention-days: 14
